@@ -60,6 +60,9 @@ _defaults = dict(
     results={},
     scale_data=[],
     ocr_hit=[],
+    scale_max_roi={"x": 391, "y":  57, "w": 43, "h": 27},
+    scale_min_roi={"x": 385, "y": 549, "w": 52, "h": 34},
+    scale_rois_confirmed=False,
 )
 for _k, _v in _defaults.items():
     if _k not in st.session_state:
@@ -144,9 +147,25 @@ def read_scale_ocr(frame: np.ndarray, reader) -> tuple:
     t_max = max(top_nums) if top_nums else None
     t_min = min(bot_nums) if bot_nums else None
 
-    if t_max is not None and t_min is not None and (t_max <= t_min or t_max - t_min < 5):
+    if t_max is not None and t_min is not None and t_max <= t_min:
         return None, None
     return t_min, t_max
+
+
+def read_val_from_roi(frame: np.ndarray, roi: dict, reader):
+    """OCR a fixed-coordinate box; returns a float or None."""
+    x, y, w, h = roi["x"], roi["y"], roi["w"], roi["h"]
+    fh, fw = frame.shape[:2]
+    patch = frame[max(0, y):min(y + h, fh), max(0, x):min(x + w, fw)]
+    if patch.size == 0:
+        return None
+    scale = 4
+    big = cv2.resize(patch, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 160, 255, cv2.THRESH_BINARY)
+    res = reader.readtext(thresh, detail=0, allowlist="0123456789.-")
+    nums = [v for v in extract_numbers(res) if -50 <= v <= 200]
+    return nums[0] if nums else None
 
 
 def px_to_temp(px: float, t_min: float, t_max: float) -> float:
@@ -418,6 +437,121 @@ def app_body():
         st.divider()
         st.header("3️⃣ Analysis")
 
+        confirmed = st.session_state.scale_rois_confirmed
+        with st.expander("📍 Scale reading locations", expanded=not confirmed):
+            def _ocr_debug(label, roi, frame):
+                x, y, w, h = roi["x"], roi["y"], roi["w"], roi["h"]
+                fh_d, fw_d = frame.shape[:2]
+                patch = frame[max(0,y):min(y+h,fh_d), max(0,x):min(x+w,fw_d)]
+                if patch.size == 0:
+                    st.error(f"{label}: empty crop")
+                    return
+                big = cv2.resize(patch, None, fx=6, fy=6, interpolation=cv2.INTER_NEAREST)
+                gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
+                _, thresh = cv2.threshold(gray, 160, 255, cv2.THRESH_BINARY)
+                pc1, pc2 = st.columns(2)
+                pc1.image(cv2.cvtColor(big, cv2.COLOR_BGR2RGB),
+                          caption=f"{label} raw", use_container_width=True)
+                pc2.image(thresh, caption=f"{label} OCR input", use_container_width=True)
+                reader_test = load_ocr_reader()
+                if reader_test:
+                    raw_texts = reader_test.readtext(thresh, detail=0,
+                                                     allowlist="0123456789.-")
+                    nums = [v for v in extract_numbers(raw_texts) if -50 <= v <= 200]
+                    st.write(f"**Raw OCR text:** `{raw_texts}`")
+                    st.write(f"**Parsed number:** `{nums[0] if nums else 'nothing found'}`")
+                else:
+                    st.warning("OCR model not loaded.")
+
+            if confirmed:
+                mr = st.session_state.scale_max_roi
+                nr = st.session_state.scale_min_roi
+                st.success(
+                    f"Locked —  "
+                    f"Max: x={mr['x']} y={mr['y']} w={mr['w']} h={mr['h']}  |  "
+                    f"Min: x={nr['x']} y={nr['y']} w={nr['w']} h={nr['h']}"
+                )
+                col_edit, col_test = st.columns([1, 1])
+                if col_edit.button("✏️ Edit locations", key="edit_scale_rois"):
+                    st.session_state.scale_rois_confirmed = False
+                    st.rerun(scope="fragment")
+                if col_test.button("🧪 Test OCR on first frame", key="test_ocr"):
+                    _ocr_debug("Max", mr, ff2)
+                    _ocr_debug("Min", nr, ff2)
+            else:
+                st.caption(
+                    "Drag a box on each tab to set where Max and Min temperatures are, "
+                    "verify the preview, then confirm to lock."
+                )
+                frame_rgb_pin = cv2.cvtColor(ff2, cv2.COLOR_BGR2RGB)
+                tab_max, tab_min = st.tabs(["🔴 Max temperature", "🔵 Min temperature"])
+
+                def _roi_tab(tab, key_sfx, state_key, box_color):
+                    with tab:
+                        cur = st.session_state.get(state_key) or {}
+                        fig_p = px.imshow(frame_rgb_pin)
+                        if cur:
+                            fig_p.add_shape(
+                                type="rect",
+                                x0=cur["x"],            y0=cur["y"],
+                                x1=cur["x"] + cur["w"], y1=cur["y"] + cur["h"],
+                                line=dict(color=box_color, width=2),
+                            )
+                        fig_p.update_layout(
+                            dragmode="select",
+                            margin=dict(l=0, r=0, t=0, b=0),
+                            height=min(380, int(fw2 * 0.6)),
+                        )
+                        fig_p.update_xaxes(showticklabels=False)
+                        fig_p.update_yaxes(showticklabels=False)
+                        ev = st.plotly_chart(
+                            fig_p, use_container_width=True,
+                            on_select="rerun", selection_mode=("box",),
+                            key=f"pin_{key_sfx}_chart",
+                        )
+                        boxes = ev.selection.get("box", []) if ev and ev.selection else []
+                        if boxes:
+                            b = boxes[0]
+                            rx  = max(0,    int(min(b["x"])))
+                            ry  = max(0,    int(min(b["y"])))
+                            rx2 = min(fw2,  int(max(b["x"])))
+                            ry2 = min(fh2,  int(max(b["y"])))
+                            rw, rh = max(1, rx2 - rx), max(1, ry2 - ry)
+                            if st.button(
+                                f"Set  x={rx} y={ry} w={rw} h={rh}",
+                                key=f"set_{key_sfx}_roi", type="primary",
+                            ):
+                                st.session_state[state_key] = {
+                                    "x": rx, "y": ry, "w": rw, "h": rh
+                                }
+                                st.rerun(scope="fragment")
+
+                        if cur:
+                            x, y, w, h = cur["x"], cur["y"], cur["w"], cur["h"]
+                            patch = ff2[max(0, y):min(y+h, fh2), max(0, x):min(x+w, fw2)]
+                            if patch.size > 0:
+                                big = cv2.resize(patch, None, fx=6, fy=6,
+                                                 interpolation=cv2.INTER_NEAREST)
+                                gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
+                                _, thresh = cv2.threshold(gray, 160, 255, cv2.THRESH_BINARY)
+                                pc1, pc2 = st.columns(2)
+                                pc1.image(cv2.cvtColor(big, cv2.COLOR_BGR2RGB),
+                                          caption="Raw crop", use_container_width=True)
+                                pc2.image(thresh, caption="OCR input",
+                                          use_container_width=True)
+                        else:
+                            st.info("No box set — drag on the image above.")
+
+                _roi_tab(tab_max, "max", "scale_max_roi", "red")
+                _roi_tab(tab_min, "min", "scale_min_roi", "blue")
+
+                if st.session_state.scale_max_roi and st.session_state.scale_min_roi:
+                    if st.button("🔒 Confirm & Lock", type="primary", key="confirm_scale_rois"):
+                        st.session_state.scale_rois_confirmed = True
+                        st.rerun(scope="fragment")
+                else:
+                    st.info("Set both Max and Min boxes to confirm.")
+
         use_ocr = st.toggle(
             "📷 Auto-read scale bar per frame (OCR)",
             value=True,
@@ -459,23 +593,39 @@ def app_body():
             last_good   = (manual_tmin, manual_tmax)
             ocr_calls   = 0
 
+            SCALE_MAX_ROI = st.session_state.scale_max_roi
+            SCALE_MIN_ROI = st.session_state.scale_min_roi
+
             if use_ocr and reader is not None:
                 bar = st.progress(0, text="Reading scale bar (OCR)…")
+                last_max_patch, last_min_patch = None, None
                 for fi, frame in enumerate(frames):
                     bar.progress(
                         (fi + 1) / n,
-                        text=f"Reading scale bar {fi+1}/{n}  –  OCR calls so far: {ocr_calls}",
+                        text=f"Reading scale bar {fi+1}/{n}  –  OCR calls: {ocr_calls}",
                     )
-                    h_f, w_f = frame.shape[:2]
-                    bar_px = frame[:, int(w_f * 0.70):]
-                    if (last_bar_px is None
-                            or bar_px.shape != last_bar_px.shape
-                            or np.mean(np.abs(bar_px.astype(np.int16)
-                                              - last_bar_px.astype(np.int16))) > 4.0):
-                        t_min_f, t_max_f = read_scale_ocr(frame, reader)
-                        last_bar_px = bar_px.copy()
+                    fh_f, fw_f = frame.shape[:2]
+                    def _crop(roi):
+                        return frame[
+                            max(0, roi["y"]):min(roi["y"] + roi["h"], fh_f),
+                            max(0, roi["x"]):min(roi["x"] + roi["w"], fw_f),
+                        ]
+                    max_patch = _crop(SCALE_MAX_ROI)
+                    min_patch = _crop(SCALE_MIN_ROI)
+
+                    def _changed(cur, prev):
+                        return (prev is None
+                                or cur.shape != prev.shape
+                                or np.mean(np.abs(cur.astype(np.int16)
+                                                  - prev.astype(np.int16))) > 3.0)
+
+                    if _changed(max_patch, last_max_patch) or _changed(min_patch, last_min_patch):
+                        t_max_f = read_val_from_roi(frame, SCALE_MAX_ROI, reader)
+                        t_min_f = read_val_from_roi(frame, SCALE_MIN_ROI, reader)
+                        last_max_patch = max_patch.copy()
+                        last_min_patch = min_patch.copy()
                         ocr_calls += 1
-                        if t_min_f is not None and t_max_f is not None:
+                        if t_min_f is not None and t_max_f is not None and t_max_f > t_min_f:
                             raw_tmin[fi], raw_tmax[fi] = t_min_f, t_max_f
                             ocr_hit[fi] = True
                             last_good = (t_min_f, t_max_f)
