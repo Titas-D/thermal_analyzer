@@ -187,6 +187,195 @@ def smooth_and_diff(T: np.ndarray, t: np.ndarray, window: int):
 
 
 # ──────────────────────────────────────────────────────────────────
+# Conclusions
+# ──────────────────────────────────────────────────────────────────
+def render_conclusions(results: dict, sw: int) -> None:
+    st.header("5️⃣ Conclusions")
+
+    names = list(results.keys())
+    n = len(names)
+    if n == 0:
+        return
+
+    # A. Per-object stats
+    stats: dict = {}
+    for name in names:
+        T = np.array(results[name]["temp"])
+        t = np.array(results[name]["time"])
+        smoothed, d1, _ = smooth_and_diff(T, t, sw)
+        mean_temp  = float(np.mean(smoothed))
+        std_dev    = float(np.std(smoothed))
+        total_dur  = float(t[-1] - t[0])
+        win_s      = 30.0 if total_dur >= 60.0 else total_dur * 0.25
+        first_mask = t <= t[0] + win_s
+        last_mask  = t >= t[-1] - win_s
+        mean_first = float(np.mean(smoothed[first_mask]))
+        mean_last  = float(np.mean(smoothed[last_mask]))
+        delta      = mean_last - mean_first
+        mean_dtdt  = float(np.mean(d1))
+        stats[name] = {
+            "mean_temp":  mean_temp,
+            "std_dev":    std_dev,
+            "mean_first": mean_first,
+            "mean_last":  mean_last,
+            "delta":      delta,
+            "mean_dtdt":  mean_dtdt,
+        }
+
+    # B. Classification (priority order: coldest quartile > warming > highest variability > default)
+    n_cold       = max(1, round(n * 0.25))
+    by_mean      = sorted(names, key=lambda x: stats[x]["mean_temp"])
+    cold_set     = set(by_mean[:n_cold])
+    max_std_name = max(names, key=lambda x: stats[x]["std_dev"])
+
+    behaviour: dict = {}
+    for name in names:
+        if name in cold_set:
+            behaviour[name] = "Cold – possible necrotic/dormant tissue"
+        elif stats[name]["delta"] > 0.05:
+            behaviour[name] = "Warming – elevated metabolic activity"
+        elif name == max_std_name:
+            behaviour[name] = "Cooling – high thermal variability"
+        else:
+            behaviour[name] = "Cooling – stable thermal profile"
+
+    # C. Summary table
+    def _fmt_delta(d: float) -> str:
+        sign = "+" if d >= 0 else "−"
+        return f"{sign}{abs(d):.2f}°C"
+
+    rows = []
+    for name in names:
+        s = stats[name]
+        rows.append({
+            "Object":               name,
+            "Mean temp (°C)":  f"{s['mean_temp']:.2f}",
+            "Std dev (°C)":    f"{s['std_dev']:.2f}",
+            "Trend (start→end)": (
+                f"{s['mean_first']:.2f}°C → {s['mean_last']:.2f}°C"
+            ),
+            "Δ Change":        _fmt_delta(s["delta"]),
+            "Thermal behaviour":    behaviour[name],
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    # D. Per-object containers
+    st.subheader("Per-object interpretation")
+    warmest_name = max(names, key=lambda x: stats[x]["mean_temp"])
+    coldest_name = min(names, key=lambda x: stats[x]["mean_temp"])
+
+    for name in names:
+        s = stats[name]
+        with st.container(border=True):
+            tags = []
+            if name == warmest_name:
+                tags.append("warmest")
+            if name == coldest_name:
+                tags.append("coldest")
+            if name == max_std_name:
+                tags.append("highest variability")
+            if s["delta"] > 0.05:
+                tags.append("warming trend")
+            if tags:
+                st.caption("  |  ".join(f"[{tag}]" for tag in tags))
+
+            beh = behaviour[name]
+            if "Warming" in beh:
+                interp = (
+                    f"**{name}** recorded a net temperature increase of {s['delta']:.2f}°C "
+                    f"over the observation period (mean rate: {s['mean_dtdt']:+.4f}°C·s⁻¹). "
+                    f"This progressive rise is consistent with elevated respiratory or metabolic activity, "
+                    f"potentially indicative of early-stage fungal colonisation or accelerated senescence. "
+                    f"The thermal trajectory distinguishes this object from the thermally stable specimens "
+                    f"in the dataset."
+                )
+            elif "Cold" in beh:
+                interp = (
+                    f"**{name}** exhibited a mean temperature of {s['mean_temp']:.2f}°C, "
+                    f"placing it in the lowest thermal quartile among the measured objects "
+                    f"(net drift: {s['delta']:+.2f}°C). "
+                    f"Persistently depressed temperatures relative to adjacent objects may reflect "
+                    f"disrupted vascular supply, reduced cellular respiration, or the presence of "
+                    f"necrotic tissue with diminished metabolic output. "
+                    f"The depressed thermal signature warrants histological or microbiological follow-up "
+                    f"to differentiate between physiological quiescence and pathogen-induced tissue damage."
+                )
+            elif "variability" in beh:
+                interp = (
+                    f"**{name}** displayed the highest temporal thermal variability among all measured "
+                    f"objects (σ = {s['std_dev']:.2f}°C), with a net temperature "
+                    f"drift of {s['delta']:+.2f}°C. "
+                    f"Such fluctuations are consistent with heterogeneous, spatially patchy infection "
+                    f"progression through the tissue, where intermittent metabolic bursts from colonising "
+                    f"hyphae may produce transient localised heat signatures. "
+                    f"The elevated variability index suggests an active but non-uniform biological process "
+                    f"within the sampled region."
+                )
+            else:
+                interp = (
+                    f"**{name}** maintained a stable thermal profile throughout the observation period, "
+                    f"with a mean temperature of {s['mean_temp']:.2f}°C and a net drift of "
+                    f"{s['delta']:+.2f}°C (standard deviation: {s['std_dev']:.2f}°C). "
+                    f"The absence of marked thermal trends is consistent with metabolically quiescent "
+                    f"or uninfected tissue exhibiting passive heat exchange with the surrounding environment."
+                )
+            st.markdown(interp)
+
+    # E. Key findings
+    st.subheader("Key findings")
+
+    mean_temps  = [stats[nm]["mean_temp"] for nm in names]
+    spread      = max(mean_temps) - min(mean_temps)
+    spread_note = (
+        f"above the ≥1°C detection threshold of uncooled microbolometer cameras, "
+        f"suggesting the inter-object differences are instrumentally resolvable"
+        if spread >= 1.0 else
+        f"below the ≥1°C threshold typically cited for uncooled microbolometer cameras; "
+        f"the thermal contrast may approach the limits of detector sensitivity"
+    )
+
+    warming_names = [nm for nm in names if stats[nm]["delta"] > 0.05]
+    if warming_names:
+        warming_note = (
+            f"{', '.join(warming_names)} "
+            f"show{'s' if len(warming_names) == 1 else ''} a positive thermal trend "
+            f"(net ΔT > 0.05°C), which may reflect elevated metabolic "
+            f"activity associated with fungal colonisation or early-stage senescence"
+        )
+    else:
+        warming_note = (
+            "no object recorded a net warming trend exceeding 0.05°C; "
+            "thermal dynamics across all objects remained within a stable range"
+        )
+
+    hi_var_std = stats[max_std_name]["std_dev"]
+
+    practical = (
+        "The observed inter-object thermal spread supports the use of"
+        if spread >= 1.0 else
+        "The limited inter-object thermal spread constrains the applicability of"
+    )
+    practical_end = (
+        "passive IR thermography as a reliable non-destructive pre-screening tool; "
+        "uncooled microbolometer-based cameras appear capable of discriminating between "
+        "objects of differing infection status under controlled acquisition conditions"
+        if spread >= 1.0 else
+        "passive IR thermography in this configuration; higher-sensitivity detectors "
+        "or more controlled acquisition conditions may be required to reliably discriminate "
+        "between infection states"
+    )
+
+    st.markdown(
+        f"• The inter-object temperature spread is **{spread:.2f}°C**, {spread_note}.\n\n"
+        f"• {warming_note.capitalize()}.\n\n"
+        f"• **{max_std_name}** exhibits the greatest temporal variability "
+        f"(σ = {hi_var_std:.2f}°C), consistent with spatially heterogeneous "
+        f"infection propagation and intermittent localised metabolic activity.\n\n"
+        f"• {practical} {practical_end}."
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
 # UI
 # ──────────────────────────────────────────────────────────────────
 st.title("🌡️ Thermal Video Analyzer")
@@ -810,6 +999,9 @@ def app_body():
             "text/csv",
             type="primary",
         )
+
+        st.divider()
+        render_conclusions(results, sw)
 
 
 app_body()

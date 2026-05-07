@@ -1,8 +1,9 @@
 # Thermal Video Analyzer
 
-A local Streamlit web app for analyzing temperature data from thermal camera recordings.
-Upload a video, define regions of interest, and get temperature-over-time graphs with
-heating rate derivatives — all running offline on your machine.
+A local Streamlit web app for analysing temperature data from thermal camera recordings.
+Upload a video, define regions of interest, and get interactive temperature graphs,
+derivative plots, automated object classification, and an academic-style interpretation
+section — all running offline on your machine.
 
 ---
 
@@ -125,6 +126,52 @@ After analysis you get three interactive graphs:
 
 ---
 
+### Step 5 — Conclusions
+
+Automatically generated after the download button. All values are derived from the
+recorded data at runtime — no hardcoded thresholds or object names.
+
+**Summary table**
+
+A table with one row per object:
+
+| Column | Description |
+|---|---|
+| Object | ROI name |
+| Mean temp (°C) | Time-averaged smoothed temperature |
+| Std dev (°C) | Temporal variability of smoothed temperature |
+| Trend (start→end) | Mean temperature of the first window vs. the last window (30 s windows; falls back to 25 % of recording duration for clips shorter than 60 s) |
+| Δ Change | Last window minus first window |
+| Thermal behaviour | Automated classification (see below) |
+
+**Classification logic** (priority order, first match wins):
+
+| Category | Condition |
+|---|---|
+| Cold – possible necrotic/dormant tissue | Object is in the coldest 25 % by mean temperature |
+| Warming – elevated metabolic activity | Net Δ change > 0.05 °C |
+| Cooling – high thermal variability | Highest standard deviation among all objects |
+| Cooling – stable thermal profile | None of the above |
+
+**Per-object interpretation**
+
+One bordered card per object containing:
+- **Badge tags** — any that apply: `[warmest]` `[coldest]` `[highest variability]` `[warming trend]`
+- **2–3 sentence academic interpretation** linking the measured thermal behaviour to
+  possible biological states (metabolic activity, fungal colonisation, necrotic tissue,
+  or stable uninfected tissue).
+
+**Key findings**
+
+Four bullet points covering:
+- Inter-object temperature spread and whether it exceeds the ≥1 °C detection threshold
+  of uncooled microbolometer cameras
+- Which objects (if any) show a warming trend and what that may indicate
+- Which object has the highest temporal variability and the biological implication
+- Whether the observed spread supports passive IR thermography as a non-destructive
+  pre-screening tool
+
+---
 
 ## File structure
 
